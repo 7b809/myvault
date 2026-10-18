@@ -1,28 +1,4 @@
-"""MEGA-backed storage for MyVault.
-
-Everything lives inside the MEGA account:
-
-    MyVault/
-      ├── pdf/
-      ├── excel/
-      ├── json/
-      ├── png/
-      ├── jpg/
-      ├── other/
-      └── _meta/
-            ├── files.json
-            ├── links.json
-            └── notes.json
-
-On upload a fresh node is created in the appropriate category folder and
-a share link is captured. Every mutation rewrites the corresponding
-_meta/*.json file in MEGA so the account is fully self-describing — no
-external database is involved.
-
-Account values (email, share links) are never written to the log unless
-``TEST_FLAG=true``; that gate is enforced here and also by a global
-log filter (see ``logging_utils``).
-"""
+"""MEGA-backed storage for MyVault."""
 
 from __future__ import annotations
 
@@ -37,9 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import activity_log
 from mega_local import Mega
 
-from categorize import ALL_CATEGORIES, category_for
+from categorize import ALL_CATEGORIES, MIXED_FOLDER, category_for
 from config import (
     CACHE_DIR,
     MEGA_EMAIL,
@@ -97,6 +74,7 @@ class MyVaultStorage:
             "links": [],
             "notes": [],
         }
+        self._subfolder_cache: dict[tuple[str, str], str] = {}
         self._connected = False
 
     # ------------------------------------------------------------------
@@ -113,7 +91,6 @@ class MyVaultStorage:
                     "MEGA_EMAIL / MEGA_PASSWORD are not configured"
                 )
 
-            # The email only appears in logs when TEST_FLAG is true.
             if TEST_FLAG:
                 logger.info("Connecting to MEGA as %s", MEGA_EMAIL)
             else:
@@ -128,10 +105,13 @@ class MyVaultStorage:
             self._root_id = self._ensure_subfolder(
                 MEGA_ROOT_FOLDER, self._cloud_root_id
             )
-            names = list(ALL_CATEGORIES) + ["_meta"]
+
+            names = list(ALL_CATEGORIES) + ["_meta", MIXED_FOLDER]
             created = self._ensure_subfolders(self._root_id, names)
+
             for cat in ALL_CATEGORIES:
                 self._folders[cat] = created[cat]
+            self._folders[MIXED_FOLDER] = created[MIXED_FOLDER]
             self._meta_folder_id = created["_meta"]
 
             self._load_metadata()
@@ -151,6 +131,15 @@ class MyVaultStorage:
             if (node.get("a") or {}).get("n") == name:
                 return handle
         return self._mega.create_folder_at(name, parent_id)  # type: ignore[union-attr]
+
+    def _ensure_subfolder_cached(self, parent_id: str, name: str) -> str:
+        key = (parent_id, name)
+        cached = self._subfolder_cache.get(key)
+        if cached:
+            return cached
+        node_id = self._ensure_subfolder(name, parent_id)
+        self._subfolder_cache[key] = node_id
+        return node_id
 
     def _ensure_subfolders(
         self, parent_id: str, names: list[str]
@@ -184,6 +173,53 @@ class MyVaultStorage:
         return None
 
     # ------------------------------------------------------------------
+    # Sub-folder helpers
+    # ------------------------------------------------------------------
+    def _resolve_destination(
+        self, category: str, subfolder: str, mixed: bool
+    ) -> tuple[str, str]:
+        base_key = MIXED_FOLDER if mixed else category
+        base_id = self._folders.get(base_key)
+        if not base_id:
+            raise KeyError(f"Unknown category: {base_key}")
+
+        subfolder = (subfolder or "").strip()
+        if not subfolder:
+            return base_id, ""
+
+        parts = [
+            p.strip()
+            for p in subfolder.replace("\\", "/").split("/")
+            if p.strip()
+        ]
+        parts = [p for p in parts if p != "_meta" and p not in (".", "..")]
+        if not parts:
+            return base_id, ""
+
+        current = base_id
+        for part in parts:
+            current = self._ensure_subfolder_cached(current, part)
+        return current, "/".join(parts)
+
+    def list_subfolders(
+        self, category: str = "other", mixed: bool = False
+    ) -> list[str]:
+        with self._lock:
+            key = MIXED_FOLDER if mixed else category
+            parent_id = self._folders.get(key)
+            if not parent_id:
+                raise KeyError(f"Unknown category: {key}")
+            files = self._mega.get_files()  # type: ignore[union-attr]
+            names: set[str] = set()
+            for handle, node in files.items():
+                if node.get("p") != parent_id or node.get("t") != 1:
+                    continue
+                n = (node.get("a") or {}).get("n")
+                if n and n != "_meta":
+                    names.add(n)
+            return sorted(names)
+
+    # ------------------------------------------------------------------
     # Metadata sync
     # ------------------------------------------------------------------
     def _read_json_from_mega(
@@ -211,13 +247,11 @@ class MyVaultStorage:
             return None
 
     def _write_meta(self, kind: str) -> None:
-        """Rewrite one metadata file in MEGA + local mirror."""
         name = _META_FILES[kind]
         payload = json.dumps(
             self._items[kind], indent=2, ensure_ascii=False
         ).encode("utf-8")
 
-        # local mirror
         try:
             (META_DIR / name).write_bytes(payload)
         except Exception:
@@ -226,7 +260,6 @@ class MyVaultStorage:
         if not self._meta_folder_id:
             return
 
-        # destroy old then upload new
         existing = self._find_child(self._meta_folder_id, name)
         if existing:
             try:
@@ -289,6 +322,8 @@ class MyVaultStorage:
         description: str,
         src_path: Path,
         mime: str | None = None,
+        subfolder: str = "",
+        mixed: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             cat = category_for(filename)
@@ -296,13 +331,17 @@ class MyVaultStorage:
             safe_name = f"{item_id}_{_sanitize(filename)}"
             size = src_path.stat().st_size
 
+            parent_id, subfolder_path = self._resolve_destination(
+                cat, subfolder, mixed
+            )
+
             logger.info(
-                "Uploading %s (%d bytes) to MEGA category=%s",
-                filename, size, cat,
+                "Uploading %s (%d bytes) to MEGA category=%s subfolder=%r mixed=%s",
+                filename, size, cat, subfolder_path, mixed,
             )
             result = self._mega.upload(  # type: ignore[union-attr]
                 str(src_path),
-                dest=self._folders[cat],
+                dest=parent_id,
                 dest_filename=safe_name,
             )
             try:
@@ -321,7 +360,6 @@ class MyVaultStorage:
                 except Exception:
                     logger.exception("Could not obtain MEGA share link")
 
-            # cache locally for fast preview
             try:
                 cache_path = (
                     CACHE_DIR / cat / f"{item_id}{Path(filename).suffix}"
@@ -331,21 +369,61 @@ class MyVaultStorage:
             except Exception:
                 logger.exception("Local cache copy failed")
 
+            if mixed:
+                prefix = f"{MEGA_ROOT_FOLDER}/{MIXED_FOLDER}"
+            else:
+                prefix = f"{MEGA_ROOT_FOLDER}/{cat}"
+            if subfolder_path:
+                mega_path = f"{prefix}/{subfolder_path}/{safe_name}"
+            else:
+                mega_path = f"{prefix}/{safe_name}"
+
             item = {
                 "id": item_id,
                 "kind": "file",
                 "name": Path(filename).name,
                 "description": description.strip(),
                 "category": cat,
+                "subfolder": subfolder_path,
+                "mixed": bool(mixed),
                 "mime": mime or "application/octet-stream",
                 "size": size,
                 "mega_node_id": node_id,
-                "mega_path": f"{MEGA_ROOT_FOLDER}/{cat}/{safe_name}",
+                "mega_path": mega_path,
                 "link": link,
                 "created_at": _now_iso(),
             }
             self._items["files"].insert(0, item)
             self._write_meta("files")
+
+            # ── single-doc activity log ──
+            is_susp, reason = activity_log.is_suspicious_upload(
+                item["name"], size
+            )
+            activity_log.log_event(
+                "upload",
+                f"Uploaded {item['name']} ({cat}, {size} bytes)",
+                meta={
+                    "item_id": item_id,
+                    "category": cat,
+                    "subfolder": subfolder_path,
+                    "mixed": mixed,
+                    "size": size,
+                    "suspicious": is_susp,
+                },
+            )
+            if is_susp:
+                activity_log.log_event(
+                    "suspicious_upload",
+                    f"Suspicious upload: {item['name']} — {reason}",
+                    meta={
+                        "item_id": item_id,
+                        "category": cat,
+                        "size": size,
+                        "reason": reason,
+                    },
+                )
+
             return item
 
     # ------------------------------------------------------------------
@@ -403,6 +481,9 @@ class MyVaultStorage:
                 for i, item in enumerate(items):
                     if item.get("id") != item_id:
                         continue
+
+                    name = item.get("name") or item.get("title") or item_id
+
                     if kind == "files":
                         node_id = item.get("mega_node_id")
                         if node_id:
@@ -421,8 +502,16 @@ class MyVaultStorage:
                             cache.unlink(missing_ok=True)
                         except Exception:
                             pass
+
                     items.pop(i)
                     self._write_meta(kind)
+
+                    # ── single-doc activity log ──
+                    activity_log.log_event(
+                        "delete",
+                        f"Deleted {kind[:-1]}: {name}",
+                        meta={"item_id": item_id, "kind": kind},
+                    )
                     return True
         return False
 

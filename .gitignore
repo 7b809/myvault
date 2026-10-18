@@ -16,6 +16,8 @@ output
 tests
 tests
 temp
+files.txt
+file.txt
 combined_output.txt
 # Runtime data — never commit
 data/

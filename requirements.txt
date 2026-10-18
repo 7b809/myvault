@@ -5,3 +5,7 @@ jinja2
 python-dotenv
 requests
 pycryptodome
+pymongo
+bcrypt
+pyotp
+qrcode[pil]

@@ -1,4 +1,3 @@
-
 // ---------------------------------------------------------------------------
 // Vaultra dashboard
 // ---------------------------------------------------------------------------
@@ -40,6 +39,59 @@ const IMAGE_CATEGORIES = new Set([
   'png', 'jpg', 'gif', 'webp', 'image',
 ]);
 
+// Mirror of categorize.py — used only to pick the "likely" category for the
+// folder dropdown, so the correct list of sub-folders is shown.
+const CATEGORY_EXTENSIONS = {
+  pdf: ['.pdf'],
+  excel: ['.xls', '.xlsx', '.xlsm', '.xlsb', '.csv', '.tsv', '.ods'],
+  json: ['.json', '.jsonl', '.ndjson'],
+  text: ['.txt', '.text', '.md', '.markdown', '.rst', '.log', '.rtf'],
+  code: [
+    '.py', '.pyw', '.js', '.jsx', '.ts', '.tsx', '.java', '.c', '.h',
+    '.cpp', '.hpp', '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt',
+    '.kts', '.dart', '.scala', '.sh', '.bash', '.zsh', '.ps1', '.bat',
+    '.sql', '.ipynb',
+  ],
+  config: ['.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.properties', '.xml'],
+  web: ['.html', '.htm', '.css', '.scss', '.sass', '.less'],
+  png: ['.png'],
+  jpg: ['.jpg', '.jpeg'],
+  gif: ['.gif'],
+  webp: ['.webp'],
+  image: ['.bmp', '.avif', '.tif', '.tiff', '.ico'],
+  audio: ['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus', '.weba'],
+  video: ['.mp4', '.webm', '.ogv', '.mov', '.m4v', '.mpeg', '.mpg', '.avi', '.mkv', '.3gp'],
+  word: ['.doc', '.docx', '.odt', '.pages'],
+  presentation: ['.ppt', '.pptx', '.odp', '.key'],
+  archive: ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.tgz', '.zst'],
+  binary: ['.exe', '.msi', '.dll', '.so', '.dylib', '.bin', '.iso', '.apk', '.dmg', '.deb', '.rpm', '.wasm'],
+};
+
+const SPECIAL_FILENAMES = {
+  dockerfile: 'config',
+  makefile: 'code',
+  jenkinsfile: 'code',
+  '.gitignore': 'config',
+  '.gitattributes': 'config',
+  '.editorconfig': 'config',
+  '.dockerignore': 'config',
+  '.prettierrc': 'config',
+  '.eslintrc': 'config',
+};
+
+function categoryFor(filename) {
+  const name = String(filename || '').split(/[\\/]/).pop() || '';
+  if (!name) return 'other';
+  const lower = name.toLowerCase();
+  if (SPECIAL_FILENAMES[lower]) return SPECIAL_FILENAMES[lower];
+  const dot = name.lastIndexOf('.');
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : '';
+  for (const [cat, exts] of Object.entries(CATEGORY_EXTENSIONS)) {
+    if (exts.includes(ext)) return cat;
+  }
+  return 'other';
+}
+
 function emoji(cat) {
   const icons = {
     pdf: '📕',
@@ -67,7 +119,6 @@ function emoji(cat) {
 }
 
 function isBrowserPreviewable(item) {
-  // The backend may explicitly override the category-based default.
   if (typeof item.previewable === 'boolean') {
     return item.previewable;
   }
@@ -81,8 +132,25 @@ function previewActionLabel(item) {
   return isBrowserPreviewable(item) ? 'Preview' : 'Details';
 }
 
+// ---------------------------------------------------------------------------
+// API wrapper
+//
+// 401 handling: if any authenticated API call comes back 401 (session
+// expired, revoked by an admin, or the 24h token ran out), we push the
+// user back to /login. We return a never-resolving promise so that the
+// caller's catch/finally blocks don't fire with a confusing
+// "Not authenticated" alert — the page is already navigating away.
+// ---------------------------------------------------------------------------
+
 async function api(url, opts = {}) {
   const res = await fetch(url, opts);
+
+  if (res.status === 401) {
+    if (!location.pathname.startsWith('/login')) {
+      window.location.replace('/login');
+    }
+    return new Promise(() => {}); // caller's await hangs; page is navigating
+  }
 
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
@@ -157,8 +225,9 @@ function fileCard(item) {
   const safeName = esc(item.name || 'Untitled file');
   const hasImg = IMAGE_CATEGORIES.has(category);
   const previewable = isBrowserPreviewable(item);
+  const subfolder = String(item.subfolder || '');
+  const mixed = !!item.mixed;
 
-  // GIFs remain animated when /raw/<id> serves the original GIF.
   const preview = hasImg
     ? `<img
          src="/raw/${itemId}"
@@ -172,6 +241,13 @@ function fileCard(item) {
   const openIcon = previewable
     ? 'bi-box-arrow-up-right'
     : 'bi-info-circle';
+
+  const folderLine = (subfolder || mixed)
+    ? `<p class="card-subfolder">
+         <i class="bi bi-folder2"></i>
+         ${mixed ? 'mixed' : ''}${mixed && subfolder ? ' / ' : ''}${esc(subfolder)}
+       </p>`
+    : '';
 
   return `
     <article class="card" data-id="${esc(item.id)}">
@@ -194,6 +270,8 @@ function fileCard(item) {
         </div>
 
         <h3 class="card-title">${safeName}</h3>
+
+        ${folderLine}
 
         ${
           item.description
@@ -472,6 +550,13 @@ function setModalTab(tab) {
     f.classList.toggle('hidden', f.dataset.pane !== tab)
   );
 
+  // Refresh sub-folder suggestions for the active upload pane.
+  if (tab === 'file') {
+    loadFoldersFor('file');
+  } else if (tab === 'camera') {
+    loadFoldersFor('camera');
+  }
+
   if (tab !== 'camera') stopCamera();
 }
 
@@ -490,6 +575,55 @@ $$('#modal-tabs .mtab').forEach(b => {
     setModalTab(b.dataset.mtab)
   );
 });
+
+// ---------------------------------------------------------------------------
+// Sub-folder suggestions
+// ---------------------------------------------------------------------------
+
+async function loadFoldersFor(formKind) {
+  const form = formKind === 'camera'
+    ? $('#form-camera')
+    : $('#form-file');
+  if (!form) return;
+
+  const modeSelect = form.querySelector('[name="storage_mode"]');
+  const datalist   = form.querySelector('datalist');
+  if (!modeSelect || !datalist) return;
+
+  const mode = modeSelect.value;
+
+  let category = 'other';
+  if (formKind === 'camera') {
+    category = 'png';
+  } else {
+    const fileInput = form.querySelector('[name="file"]');
+    if (fileInput && fileInput.files && fileInput.files[0]) {
+      category = categoryFor(fileInput.files[0].name);
+    }
+  }
+
+  try {
+    const params = new URLSearchParams({
+      category,
+      storage_mode: mode,
+    });
+    const data = await api(`/api/folders?${params.toString()}`);
+    const folders = Array.isArray(data.folders) ? data.folders : [];
+
+    datalist.innerHTML = folders
+      .map(f => `<option value="${esc(f)}"></option>`)
+      .join('');
+  } catch {
+    datalist.innerHTML = '';
+  }
+}
+
+// File form: refresh when the file or the storage mode changes.
+$('#file-file').addEventListener('change', () => loadFoldersFor('file'));
+$('#file-storage').addEventListener('change', () => loadFoldersFor('file'));
+
+// Camera form: refresh when the storage mode changes.
+$('#camera-storage').addEventListener('change', () => loadFoldersFor('camera'));
 
 // ---------------------------------------------------------------------------
 // File form
@@ -511,6 +645,8 @@ $('#form-file').addEventListener('submit', async e => {
     fd.append('file', form.file.files[0]);
     fd.append('name', form.name.value);
     fd.append('description', form.description.value);
+    fd.append('subfolder', form.subfolder.value);
+    fd.append('storage_mode', form.storage_mode.value);
 
     await api('/api/upload/file', {
       method: 'POST',
@@ -605,6 +741,8 @@ async function captureAndUpload() {
     fd.append('file', blob, 'capture.png');
     fd.append('name', form.name.value);
     fd.append('description', form.description.value);
+    fd.append('subfolder', form.subfolder.value);
+    fd.append('storage_mode', form.storage_mode.value);
 
     await api('/api/upload/capture', {
       method: 'POST',
@@ -624,7 +762,7 @@ async function captureAndUpload() {
   } finally {
     btn.disabled = false;
     btn.innerHTML =
-      '<i class="bi bi-camera"></i> Capture &amp; upload';
+      '<i class="bi bi-camera"></i> Capture & upload';
   }
 }
 
@@ -737,7 +875,6 @@ $('#form-note').addEventListener('submit', async e => {
 
 // ---------------------------------------------------------------------------
 // Wrap FAB → "Show only" section picker
-// Selecting an option switches the view; it never opens the upload modal.
 // ---------------------------------------------------------------------------
 
 const wrapBtn = $('#fab-wrap');
@@ -820,6 +957,36 @@ document.addEventListener('keydown', e => {
     closeWrap();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Sign out
+//
+// Uses raw fetch (not api()) so a 401 from the logout endpoint itself
+// doesn't bounce us around — the logout endpoint doesn't need a valid
+// session anyway (it just revokes whatever token was sent).
+// ---------------------------------------------------------------------------
+
+const logoutBtn = $('#logout-btn');
+
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async () => {
+    if (!confirm('Sign out of MyVault?')) return;
+
+    logoutBtn.disabled = true;
+
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch {
+      // Ignore network failure — cookie will expire naturally anyway
+    }
+
+    // Hard redirect so no in-memory state survives the sign-out
+    window.location.replace('/login');
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Boot

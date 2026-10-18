@@ -22,20 +22,30 @@
         <span>Private cloud</span>
       </div>
     </div>
-    <nav class="tabs" id="kind-tabs" role="tablist">
-      <button class="tab active" data-kind="file" role="tab" aria-selected="true">
-        <i class="bi bi-file-earmark-text"></i>
-        <span>Files</span>
+
+    <div class="topbar-actions">
+      <nav class="tabs" id="kind-tabs" role="tablist">
+        <button class="tab active" data-kind="file" role="tab" aria-selected="true">
+          <i class="bi bi-file-earmark-text"></i>
+          <span>Files</span>
+        </button>
+        <button class="tab" data-kind="link" role="tab" aria-selected="false">
+          <i class="bi bi-link-45deg"></i>
+          <span>Links</span>
+        </button>
+        <button class="tab" data-kind="note" role="tab" aria-selected="false">
+          <i class="bi bi-journal-text"></i>
+          <span>Notes</span>
+        </button>
+      </nav>
+
+      <button class="tab logout-btn" id="logout-btn"
+              type="button"
+              title="Sign out"
+              aria-label="Sign out">
+        <i class="bi bi-box-arrow-right"></i>
       </button>
-      <button class="tab" data-kind="link" role="tab" aria-selected="false">
-        <i class="bi bi-link-45deg"></i>
-        <span>Links</span>
-      </button>
-      <button class="tab" data-kind="note" role="tab" aria-selected="false">
-        <i class="bi bi-journal-text"></i>
-        <span>Notes</span>
-      </button>
-    </nav>
+    </div>
   </header>
 
   <main class="container">
@@ -133,6 +143,29 @@
           <label class="form-label" for="file-file">File</label>
           <input class="form-control" type="file" id="file-file" name="file" required>
         </div>
+
+        <!-- Storage mode -->
+        <div class="mb-3">
+          <label class="form-label" for="file-storage">Save in</label>
+          <select class="form-control" id="file-storage" name="storage_mode">
+            <option value="category">Category folder (pdf, png, excel, …)</option>
+            <option value="mixed">Mixed folder (all file types together)</option>
+          </select>
+        </div>
+
+        <!-- Subfolder (optional) -->
+        <div class="mb-3">
+          <label class="form-label" for="file-subfolder">Subfolder (optional)</label>
+          <input class="form-control" id="file-subfolder" name="subfolder"
+                 list="file-subfolder-list" autocomplete="off"
+                 placeholder="Leave blank for root, or pick / type a name">
+          <datalist id="file-subfolder-list"></datalist>
+          <div class="v-hint">
+            Pick an existing folder or type a new one — nested paths like
+            <code>invoices/2024</code> are allowed.
+          </div>
+        </div>
+
         <button type="submit" class="btn-primary">
           <i class="bi bi-cloud-upload"></i> Upload to MEGA
         </button>
@@ -143,7 +176,7 @@
         <div class="mb-3">
           <label class="form-label" for="camera-name">Name</label>
           <input class="form-control" id="camera-name" name="name"
-                 placeholder="capture_&lt;auto&gt;.png">
+                 placeholder="capture_<auto>.png">
         </div>
         <div class="mb-3">
           <label class="form-label" for="camera-desc">Description</label>
@@ -153,7 +186,7 @@
           <video id="camera-video" autoplay playsinline muted></video>
           <canvas id="camera-canvas" class="hidden"></canvas>
         </div>
-        <div class="camera-controls">
+        <div class="camera-controls mb-3">
           <button type="button" class="btn-secondary" id="camera-start">
             <i class="bi bi-camera-video"></i> Start camera
           </button>
@@ -161,8 +194,26 @@
             <i class="bi bi-stop-circle"></i> Stop
           </button>
           <button type="button" class="btn-primary" id="camera-capture" disabled>
-            <i class="bi bi-camera"></i> Capture &amp; upload
+            <i class="bi bi-camera"></i> Capture & upload
           </button>
+        </div>
+
+        <!-- Storage mode -->
+        <div class="mb-3">
+          <label class="form-label" for="camera-storage">Save in</label>
+          <select class="form-control" id="camera-storage" name="storage_mode">
+            <option value="category">Category folder (png)</option>
+            <option value="mixed">Mixed folder (all file types together)</option>
+          </select>
+        </div>
+
+        <!-- Subfolder (optional) -->
+        <div class="mb-3">
+          <label class="form-label" for="camera-subfolder">Subfolder (optional)</label>
+          <input class="form-control" id="camera-subfolder" name="subfolder"
+                 list="camera-subfolder-list" autocomplete="off"
+                 placeholder="Leave blank for root, or pick / type a name">
+          <datalist id="camera-subfolder-list"></datalist>
         </div>
       </form>
 
@@ -227,6 +278,100 @@
         navigator.serviceWorker.register('/sw.js').catch(() => {});
       });
     }
+
+    // -----------------------------------------------------------------
+    // Logout — POST /api/auth/logout then redirect to /login
+    // -----------------------------------------------------------------
+    (function () {
+      const btn = document.getElementById('logout-btn');
+      if (!btn) return;
+
+      btn.addEventListener('click', async () => {
+        if (!confirm('Sign out of MyVault?')) return;
+
+        btn.disabled = true;
+        try {
+          await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'same-origin',
+          });
+        } catch {
+          // ignore network failures — still redirect
+        }
+        window.location.href = '/login';
+      });
+    })();
+
+    // If any fetch returns 401, bounce back to /login automatically.
+    (function () {
+      const originalFetch = window.fetch;
+      window.fetch = function () {
+        return originalFetch.apply(this, arguments).then(res => {
+          if (res.status === 401) {
+            // Only redirect if we're not already on the login page
+            if (!location.pathname.startsWith('/login')) {
+              window.location.href = '/login';
+            }
+          }
+          return res;
+        });
+      };
+    })();
   </script>
+
+  <style>
+    /* ---------------------------------------------------------------------
+       Topbar actions — holds tabs + logout button side-by-side
+       --------------------------------------------------------------------- */
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .logout-btn {
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      background: var(--bg-2);
+    }
+    .logout-btn:hover {
+      color: #ffb4b4;
+      background: rgba(239, 68, 68, 0.12);
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+    .logout-btn i { font-size: 1rem; }
+
+    /* Small addition — helper text under sub-folder inputs. */
+    .v-hint {
+      color: var(--muted, #8394ab);
+      font-size: 0.72rem;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    .v-hint code {
+      color: #a8b3ff;
+      background: rgba(99, 102, 241, 0.12);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .card-subfolder {
+      color: var(--muted, #8394ab);
+      font-size: 0.72rem;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .card-subfolder i { font-size: 0.85rem; opacity: 0.9; }
+
+    /* Mobile tweak — keep the logout button from wrapping awkwardly */
+    @media (max-width: 640px) {
+      .topbar-actions { width: 100%; justify-content: space-between; }
+      .logout-btn { flex-shrink: 0; }
+    }
+  </style>
 </body>
 </html>

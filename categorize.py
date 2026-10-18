@@ -1,4 +1,3 @@
-
 """Map a filename to a MEGA sub-folder category.
 
 Categories are used for file organization.
@@ -10,6 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# --------------------------------------------------
+# SPECIAL FOLDERS
+# --------------------------------------------------
+
+# Root-level folder where files of *any* extension can be grouped
+# together (instead of being split by category).
+MIXED_FOLDER = "mixed"
 
 # --------------------------------------------------
 # FILE CATEGORY MAPPING
@@ -195,7 +201,6 @@ CATEGORY_EXTENSIONS: dict[str, set[str]] = {
     },
 }
 
-
 # Special filenames that do not have normal extensions.
 SPECIAL_FILENAMES: dict[str, str] = {
     "dockerfile": "config",
@@ -209,10 +214,8 @@ SPECIAL_FILENAMES: dict[str, str] = {
     ".eslintrc": "config",
 }
 
-
 # Unknown extensions are stored in this folder.
 FALLBACK = "other"
-
 
 # Folder names created by the file manager.
 ALL_CATEGORIES: list[str] = [
@@ -236,7 +239,6 @@ ALL_CATEGORIES: list[str] = [
     "binary",
     FALLBACK,
 ]
-
 
 # --------------------------------------------------
 # PREVIEW POLICY
@@ -269,7 +271,6 @@ _BROWSER_PREVIEW_CATEGORIES = (
     }
 )
 
-
 # --------------------------------------------------
 # PUBLIC FUNCTIONS
 # --------------------------------------------------
@@ -294,26 +295,21 @@ def category_for(filename: str) -> str:
 
     return FALLBACK
 
-
 def is_image(category: str) -> bool:
     """Return True if the category contains image files."""
     return category in _IMAGE_CATEGORIES
-
 
 def is_text_previewable(category: str) -> bool:
     """Return True if the category can be previewed as text."""
     return category in _TEXT_PREVIEW_CATEGORIES
 
-
 def is_browser_previewable(category: str) -> bool:
     """Return whether the category supports a browser preview."""
     return category in _BROWSER_PREVIEW_CATEGORIES
 
-
 def is_download_only(category: str) -> bool:
     """Return True if the category should not be previewed directly."""
     return not is_browser_previewable(category)
-
 
 def preview_type(category: str) -> str:
     """Return the recommended preview component for a category."""

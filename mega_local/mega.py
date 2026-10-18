@@ -639,51 +639,87 @@ class Mega:
         else:
             dest_path += '/'
 
-        with tempfile.NamedTemporaryFile(mode='w+b', prefix='megapy_',
-                                         delete=False) as temp_output_file:
-            k_str = a32_to_str(k)
-            counter = Counter.new(
-                128, initial_value=((iv[0] << 32) + iv[1]) << 64)
-            aes = AES.new(k_str, AES.MODE_CTR, counter=counter)
+        # ──────────────────────────────────────────────────────────
+        # Windows note: shutil.move() fails with WinError 32 if the
+        # source file is still open. So we must (a) write to a temp
+        # file, (b) CLOSE it (leaving the ``with`` block), and only
+        # then move it into place. We also retry the move briefly
+        # because AV scanners on Windows can hold a transient lock
+        # on freshly-written files.
+        # ──────────────────────────────────────────────────────────
+        temp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w+b', prefix='megapy_',
+                                             delete=False) as temp_output_file:
+                temp_name = temp_output_file.name
 
-            mac_str = '\0' * 16
-            mac_encryptor = AES.new(k_str, AES.MODE_CBC,
-                                    mac_str.encode("utf8"))
-            iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
+                k_str = a32_to_str(k)
+                counter = Counter.new(
+                    128, initial_value=((iv[0] << 32) + iv[1]) << 64)
+                aes = AES.new(k_str, AES.MODE_CTR, counter=counter)
 
-            for chunk_start, chunk_size in get_chunks(file_size):
-                chunk = input_file.read(chunk_size)
-                chunk = aes.decrypt(chunk)
-                temp_output_file.write(chunk)
+                mac_str = '\0' * 16
+                mac_encryptor = AES.new(k_str, AES.MODE_CBC,
+                                        mac_str.encode("utf8"))
+                iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
 
-                encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
-                for i in range(0, len(chunk) - 16, 16):
+                for chunk_start, chunk_size in get_chunks(file_size):
+                    chunk = input_file.read(chunk_size)
+                    chunk = aes.decrypt(chunk)
+                    temp_output_file.write(chunk)
+
+                    encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
+                    for i in range(0, len(chunk) - 16, 16):
+                        block = chunk[i:i + 16]
+                        encryptor.encrypt(block)
+
+                    # fix for files under 16 bytes failing
+                    if file_size > 16:
+                        i += 16
+                    else:
+                        i = 0
+
                     block = chunk[i:i + 16]
-                    encryptor.encrypt(block)
+                    if len(block) % 16:
+                        block += b'\0' * (16 - (len(block) % 16))
+                    mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
 
-                # fix for files under 16 bytes failing
-                if file_size > 16:
-                    i += 16
-                else:
-                    i = 0
+                    file_info = os.stat(temp_output_file.name)
+                    logger.info('%s of %s downloaded',
+                                file_info.st_size, file_size)
 
-                block = chunk[i:i + 16]
-                if len(block) % 16:
-                    block += b'\0' * (16 - (len(block) % 16))
-                mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
+                file_mac = str_to_a32(mac_str)
+                if (file_mac[0] ^ file_mac[1],
+                        file_mac[2] ^ file_mac[3]) != meta_mac:
+                    raise ValueError('Mismatched mac')
 
-                file_info = os.stat(temp_output_file.name)
-                logger.info('%s of %s downloaded',
-                            file_info.st_size, file_size)
-
-            file_mac = str_to_a32(mac_str)
-            if (file_mac[0] ^ file_mac[1],
-                    file_mac[2] ^ file_mac[3]) != meta_mac:
-                raise ValueError('Mismatched mac')
-
+            # Temp file is now closed — safe to move on Windows.
             output_path = Path(dest_path + file_name)
-            shutil.move(temp_output_file.name, output_path)
-            return output_path
+
+            last_exc = None
+            for attempt in range(5):
+                try:
+                    shutil.move(str(temp_name), str(output_path))
+                    return output_path
+                except PermissionError as exc:
+                    last_exc = exc
+                    if attempt == 4:
+                        break
+                    time.sleep(0.1 * (attempt + 1))
+
+            raise last_exc if last_exc else RuntimeError(
+                'download: move failed for unknown reason')
+
+        except Exception:
+            # Best-effort cleanup on any failure so we don't leak
+            # files in %TEMP% when a download aborts midway
+            # (bad MAC, connection drop, disk full, move failure).
+            if temp_name:
+                try:
+                    os.unlink(temp_name)
+                except Exception:
+                    pass
+            raise
 
     # ═══════════════════════════════════════════════════════════════
     # Upload
@@ -802,7 +838,7 @@ class Mega:
                 }],
             })
             logger.info('Upload complete')
-            return data    
+            return data
 
     # ═══════════════════════════════════════════════════════════════
     # Folders / rename
@@ -946,4 +982,4 @@ class Mega:
         if parent_node_id is None:
             parent_node_id = self._root_node_id()
         created = self._mkdir(name, parent_node_id)
-        return created['f'][0]['h']    
+        return created['f'][0]['h']
