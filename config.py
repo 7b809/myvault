@@ -40,7 +40,12 @@ PORT = int(_env("PORT", "8000") or "8000")
 TEST_FLAG = _env_bool("TEST_FLAG", False)
 
 # ---- Local storage -------------------------------------------------------
-DATA_DIR = BASE_DIR / (_env("DATA_DIR", "data") or "data")
+# Use Vercel's writable /tmp directory if deployed, otherwise use local data/
+if os.environ.get("VERCEL"):
+    DATA_DIR = Path("/tmp/data")
+else:
+    DATA_DIR = BASE_DIR / (_env("DATA_DIR", "data") or "data")
+
 CACHE_DIR = DATA_DIR / "cache"
 META_DIR = DATA_DIR / "meta"
 
