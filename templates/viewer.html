@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -11,18 +12,22 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
+
 <body class="viewer-body">
   <header class="topbar">
     <div class="brand">
       <a href="/" class="back" aria-label="Back" title="Back (Esc)">
         <i class="bi bi-arrow-left"></i>
       </a>
+
       <img src="/static/icons/icon.svg" alt="" class="brand-logo">
+
       <div class="brand-text">
         <h1 id="v-title">Loading…</h1>
         <span id="v-sub"></span>
       </div>
     </div>
+
     <div class="viewer-actions" id="v-actions"></div>
   </header>
 
@@ -40,294 +45,780 @@
     // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+
     function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, c => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
       }[c]));
     }
 
-    function emoji(c) {
-      return ({
-        pdf: '📕', excel: '📊', json: '🧾',
-        png: '🖼️', jpg: '🖼️', other: '📁'
-      }[c]) || '📁';
+    function emoji(category) {
+      const icons = {
+        pdf: '📕',
+        excel: '📊',
+        json: '🧾',
+        text: '📝',
+        code: '💻',
+        config: '⚙️',
+        web: '🌐',
+        png: '🖼️',
+        jpg: '🖼️',
+        gif: '🎞️',
+        webp: '🖼️',
+        image: '🖼️',
+        audio: '🎵',
+        video: '🎬',
+        word: '📘',
+        presentation: '📽️',
+        archive: '🗜️',
+        binary: '📦',
+        other: '📁'
+      };
+
+      return icons[String(category || 'other').toLowerCase()] || '📁';
     }
 
     function fmtSize(n) {
       if (!n && n !== 0) return '';
-      const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let i = 0, x = n;
-      while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
-      return `${x.toFixed(x < 10 ? 2 : 1)} ${u[i]}`;
+
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      let x = n;
+
+      while (x >= 1024 && i < units.length - 1) {
+        x /= 1024;
+        i++;
+      }
+
+      return `${x.toFixed(x < 10 ? 2 : 1)} ${units[i]}`;
     }
 
     function fmtDate(iso) {
       if (!iso) return '';
+
       try {
         const d = new Date(iso);
+
         if (isNaN(d.getTime())) return '';
+
         return d.toLocaleString(undefined, {
-          year: 'numeric', month: 'short', day: 'numeric',
-          hour: '2-digit', minute: '2-digit'
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
         });
-      } catch { return ''; }
+      } catch {
+        return '';
+      }
     }
 
-    async function copyToClipboard(text, btnEl) {
+    async function api(url, options = {}) {
+      const response = await fetch(url, options);
+
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+
+        try {
+          const data = await response.json();
+          message = data.detail || message;
+        } catch {}
+
+        throw new Error(message);
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+
+      if (contentType.includes('application/json')) {
+        return response.json();
+      }
+
+      return response.text();
+    }
+
+    async function copyToClipboard(text, button) {
       try {
         await navigator.clipboard.writeText(text);
       } catch {
-        // Fallback for insecure contexts
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); } catch {}
-        ta.remove();
+        const textarea = document.createElement('textarea');
+
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+
+        document.body.appendChild(textarea);
+        textarea.select();
+
+        try {
+          document.execCommand('copy');
+        } catch {}
+
+        textarea.remove();
       }
-      if (btnEl) {
-        const orig = btnEl.innerHTML;
-        btnEl.innerHTML = '<i class="bi bi-check2"></i> Copied';
-        setTimeout(() => { btnEl.innerHTML = orig; }, 1200);
+
+      if (button) {
+        const original = button.innerHTML;
+
+        button.innerHTML =
+          '<i class="bi bi-check2"></i> Copied';
+
+        setTimeout(() => {
+          button.innerHTML = original;
+        }, 1200);
       }
     }
 
     // ---------------------------------------------------------------------
-    // Metadata strip (created date · size · category)
+    // Preview categories
+    //
+    // Keep these category names synchronized with the Python backend.
     // ---------------------------------------------------------------------
+
+    const IMAGE_CATEGORIES = new Set([
+      'png',
+      'jpg',
+      'gif',
+      'webp',
+      'image'
+    ]);
+
+    const TEXT_PREVIEW_CATEGORIES = new Set([
+      'text',
+      'code',
+      'config',
+      'web'
+    ]);
+
+    const BROWSER_PREVIEW_CATEGORIES = new Set([
+      ...IMAGE_CATEGORIES,
+      ...TEXT_PREVIEW_CATEGORIES,
+      'pdf',
+      'json',
+      'audio',
+      'video'
+    ]);
+
+    function isBrowserPreviewable(item) {
+      // The backend can explicitly override the default policy.
+      if (typeof item.previewable === 'boolean') {
+        return item.previewable;
+      }
+
+      const category = String(item.category || 'other').toLowerCase();
+
+      return BROWSER_PREVIEW_CATEGORIES.has(category);
+    }
+
+    // ---------------------------------------------------------------------
+    // Metadata strip
+    // ---------------------------------------------------------------------
+
     function metaStrip(item) {
       const bits = [];
+
       if (item.created_at) {
-        bits.push(`<span><i class="bi bi-clock"></i> ${esc(fmtDate(item.created_at))}</span>`);
+        bits.push(`
+          <span>
+            <i class="bi bi-clock"></i>
+            ${esc(fmtDate(item.created_at))}
+          </span>
+        `);
       }
-      if (item.size) {
-        bits.push(`<span><i class="bi bi-hdd"></i> ${esc(fmtSize(item.size))}</span>`);
+
+      if (item.size != null) {
+        bits.push(`
+          <span>
+            <i class="bi bi-hdd"></i>
+            ${esc(fmtSize(item.size))}
+          </span>
+        `);
       }
+
       if (item.category) {
-        bits.push(`<span><i class="bi bi-tag"></i> ${esc(item.category)}</span>`);
+        bits.push(`
+          <span>
+            <i class="bi bi-tag"></i>
+            ${esc(item.category)}
+          </span>
+        `);
       }
+
       if (item.kind === 'link') {
-        bits.push(`<span><i class="bi bi-link-45deg"></i> link</span>`);
+        bits.push(`
+          <span>
+            <i class="bi bi-link-45deg"></i>
+            link
+          </span>
+        `);
       }
+
       if (item.kind === 'note') {
-        bits.push(`<span><i class="bi bi-journal-text"></i> note</span>`);
+        bits.push(`
+          <span>
+            <i class="bi bi-journal-text"></i>
+            note
+          </span>
+        `);
       }
+
       if (!bits.length) return '';
+
       return `<div class="viewer-meta">${bits.join('')}</div>`;
     }
 
     // ---------------------------------------------------------------------
     // Delete
     // ---------------------------------------------------------------------
+
     async function deleteCurrent() {
-      if (!confirm('Delete this item permanently? This cannot be undone.')) return;
+      if (!confirm(
+        'Delete this item permanently? This cannot be undone.'
+      )) {
+        return;
+      }
+
       try {
-        const res = await fetch(`/api/items/${encodeURIComponent(ITEM_ID)}`, {
-          method: 'DELETE'
-        });
-        if (!res.ok) {
-          let msg = `HTTP ${res.status}`;
-          try { const j = await res.json(); msg = j.detail || msg; } catch {}
-          throw new Error(msg);
-        }
+        await api(
+          `/api/items/${encodeURIComponent(ITEM_ID)}`,
+          { method: 'DELETE' }
+        );
+
         location.href = '/';
-      } catch (err) {
-        alert('Delete failed: ' + err.message);
+      } catch (error) {
+        alert('Delete failed: ' + error.message);
       }
     }
 
     // ---------------------------------------------------------------------
-    // Actions per kind
+    // Actions per item type
     // ---------------------------------------------------------------------
+
     function renderActions(item) {
       const actions = document.getElementById('v-actions');
       const parts = [];
 
+      const itemId = encodeURIComponent(
+        String(item.id ?? ITEM_ID)
+      );
+
       if (item.kind === 'file') {
+        if (isBrowserPreviewable(item)) {
+          parts.push(`
+            <a
+              class="btn-sm"
+              href="/raw/${itemId}"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open original file"
+            >
+              <i class="bi bi-box-arrow-up-right"></i>
+              Open raw
+            </a>
+          `);
+        }
+
         parts.push(`
-          <a class="btn-sm" href="/raw/${item.id}" target="_blank" rel="noopener"
-             title="Open raw">
-            <i class="bi bi-box-arrow-up-right"></i> Open raw
-          </a>`);
-        parts.push(`
-          <a class="btn-sm" href="/download/${item.id}" id="v-download"
-             title="Download (D)">
-            <i class="bi bi-download"></i> Download
-          </a>`);
+          <a
+            class="btn-sm"
+            href="/download/${itemId}"
+            id="v-download"
+            title="Download (D)"
+          >
+            <i class="bi bi-download"></i>
+            Download
+          </a>
+        `);
+
         if (item.link) {
           parts.push(`
-            <button class="btn-sm" type="button" id="v-copy-mega"
-                    title="Copy MEGA share link">
-              <i class="bi bi-share"></i> Copy MEGA link
-            </button>`);
+            <button
+              class="btn-sm"
+              type="button"
+              id="v-copy-mega"
+              title="Copy MEGA share link"
+            >
+              <i class="bi bi-share"></i>
+              Copy MEGA link
+            </button>
+          `);
         }
       } else if (item.kind === 'link') {
         parts.push(`
-          <a class="btn-sm" href="${esc(item.url)}" target="_blank" rel="noopener"
-             title="Open URL">
-            <i class="bi bi-box-arrow-up-right"></i> Open
-          </a>`);
+          <a
+            class="btn-sm"
+            href="${esc(item.url)}"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open URL"
+          >
+            <i class="bi bi-box-arrow-up-right"></i>
+            Open
+          </a>
+        `);
+
         parts.push(`
-          <button class="btn-sm" type="button" id="v-copy-url"
-                  title="Copy URL">
-            <i class="bi bi-clipboard"></i> Copy URL
-          </button>`);
+          <button
+            class="btn-sm"
+            type="button"
+            id="v-copy-url"
+            title="Copy URL"
+          >
+            <i class="bi bi-clipboard"></i>
+            Copy URL
+          </button>
+        `);
       } else if (item.kind === 'note') {
         parts.push(`
-          <button class="btn-sm" type="button" id="v-copy-note"
-                  title="Copy note body">
-            <i class="bi bi-clipboard"></i> Copy text
-          </button>`);
+          <button
+            class="btn-sm"
+            type="button"
+            id="v-copy-note"
+            title="Copy note body"
+          >
+            <i class="bi bi-clipboard"></i>
+            Copy text
+          </button>
+        `);
       }
 
       parts.push(`
-        <button class="btn-sm danger" type="button" id="v-delete"
-                title="Delete">
-          <i class="bi bi-trash"></i> Delete
-        </button>`);
+        <button
+          class="btn-sm danger"
+          type="button"
+          id="v-delete"
+          title="Delete"
+        >
+          <i class="bi bi-trash"></i>
+          Delete
+        </button>
+      `);
 
       actions.innerHTML = parts.join('');
 
-      // Wire the buttons that were just created.
       const copyMega = document.getElementById('v-copy-mega');
+
       if (copyMega && item.link) {
-        copyMega.onclick = () => copyToClipboard(item.link, copyMega);
+        copyMega.onclick = () =>
+          copyToClipboard(item.link, copyMega);
       }
+
       const copyUrl = document.getElementById('v-copy-url');
-      if (copyUrl) copyUrl.onclick = () => copyToClipboard(item.url, copyUrl);
+
+      if (copyUrl) {
+        copyUrl.onclick = () =>
+          copyToClipboard(item.url, copyUrl);
+      }
+
       const copyNote = document.getElementById('v-copy-note');
-      if (copyNote) copyNote.onclick = () => copyToClipboard(item.body, copyNote);
-      const del = document.getElementById('v-delete');
-      if (del) del.onclick = deleteCurrent;
+
+      if (copyNote) {
+        copyNote.onclick = () =>
+          copyToClipboard(item.body, copyNote);
+      }
+
+      const deleteButton = document.getElementById('v-delete');
+
+      if (deleteButton) {
+        deleteButton.onclick = deleteCurrent;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // Load a file as plain text
+    //
+    // Use textContent rather than innerHTML so uploaded HTML, JavaScript,
+    // source code, logs and configuration files are never executed.
+    // ---------------------------------------------------------------------
+
+    async function renderTextFile(src, paneId, options = {}) {
+      const pane = document.getElementById(paneId);
+
+      if (!pane) return;
+
+      try {
+        const response = await fetch(src);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const text = await response.text();
+
+        if (options.json) {
+          try {
+            pane.textContent = JSON.stringify(
+              JSON.parse(text),
+              null,
+              2
+            );
+            return;
+          } catch {
+            // JSONL/NDJSON contains one JSON value per line.
+            if (options.jsonLines) {
+              pane.textContent = text
+                .split(/\r?\n/)
+                .map(line => {
+                  if (!line.trim()) return line;
+
+                  try {
+                    return JSON.stringify(
+                      JSON.parse(line),
+                      null,
+                      2
+                    );
+                  } catch {
+                    return line;
+                  }
+                })
+                .join('\n');
+
+              return;
+            }
+          }
+        }
+
+        pane.textContent = text;
+      } catch (error) {
+        pane.textContent =
+          'Unable to load preview: ' + error.message;
+      }
     }
 
     // ---------------------------------------------------------------------
     // Render
     // ---------------------------------------------------------------------
+
     function render(item, main) {
       const title = item.title || item.name || 'Item';
+
       document.title = `MyVault · ${title}`;
       document.getElementById('v-title').textContent = title;
-      document.getElementById('v-sub').textContent = item.description || '';
+      document.getElementById('v-sub').textContent =
+        item.description || '';
 
       renderActions(item);
 
       // ---- LINK ---------------------------------------------------------
+
       if (item.kind === 'link') {
         main.innerHTML = `
           <div class="viewer-info">
             ${metaStrip(item)}
+
             <h2>${esc(item.title)}</h2>
+
             <p class="muted">${esc(item.description)}</p>
+
             <p>
-              <a class="link-url" href="${esc(item.url)}" target="_blank" rel="noopener">
-                ${esc(item.url)}
-              </a>
+              <a
+                class="link-url"
+                href="${esc(item.url)}"
+                target="_blank"
+                rel="noopener noreferrer"
+              >${esc(item.url)}</a>
             </p>
-            ${item.what_it_does
-              ? `<h3>What it does</h3><p>${esc(item.what_it_does)}</p>`
-              : ''}
-          </div>`;
+
+            ${
+              item.what_it_does
+                ? `<h3>What it does</h3>
+                   <p>${esc(item.what_it_does)}</p>`
+                : ''
+            }
+          </div>
+        `;
+
         return;
       }
 
       // ---- NOTE ---------------------------------------------------------
+
       if (item.kind === 'note') {
         main.innerHTML = `
-          <div class="viewer-note" style="--note-color:${esc(item.color || '#6366f1')}">
+          <div
+            class="viewer-note"
+            style="--note-color:${esc(item.color || '#6366f1')}"
+          >
             ${metaStrip(item)}
+
             <h2>${esc(item.title)}</h2>
+
             <p class="muted">${esc(item.description)}</p>
+
             <pre>${esc(item.body)}</pre>
-          </div>`;
+          </div>
+        `;
+
         return;
       }
 
       // ---- FILE ---------------------------------------------------------
-      const cat = item.category;
-      const src = `/raw/${item.id}`;
-      const meta = metaStrip(item);
 
-      if (cat === 'png' || cat === 'jpg') {
+      const category = String(
+        item.category || 'other'
+      ).toLowerCase();
+
+      const itemId = encodeURIComponent(
+        String(item.id ?? ITEM_ID)
+      );
+
+      const src = `/raw/${itemId}`;
+      const downloadUrl = `/download/${itemId}`;
+      const meta = metaStrip(item);
+      const name = item.name || title;
+
+      // Images: PNG, JPEG, GIF, WebP and other configured image formats.
+      if (IMAGE_CATEGORIES.has(category)) {
         main.innerHTML = `
           ${meta}
-          <img class="viewer-img" src="${src}" alt="${esc(item.name)}"
-               title="Click to open full size"
-               onclick="window.open('${src}', '_blank')">`;
-      } else if (cat === 'pdf') {
-        main.innerHTML = `
-          ${meta}
-          <iframe class="viewer-pdf" src="${src}" title="${esc(item.name)}"></iframe>`;
-      } else if (cat === 'json') {
-        main.innerHTML = `${meta}<pre class="viewer-json" id="json-pane">Loading…</pre>`;
-        fetch(src)
-          .then(r => r.text())
-          .then(t => {
-            let pretty = t;
-            try { pretty = JSON.stringify(JSON.parse(t), null, 2); } catch {}
-            document.getElementById('json-pane').textContent = pretty;
-          })
-          .catch(() => {
-            document.getElementById('json-pane').textContent =
-              'Failed to load JSON';
-          });
-      } else {
-        main.innerHTML = `
-          ${meta}
-          <div class="viewer-info center">
-            <div class="preview-icon big">${emoji(cat)}</div>
-            <h2>${esc(item.name)}</h2>
-            <p class="muted">${esc(item.description || '')}</p>
-            <p class="muted">${fmtSize(item.size)} · ${esc(item.category)}</p>
-            <a class="btn-primary" href="/download/${item.id}">
-              <i class="bi bi-download"></i> Download
-            </a>
-          </div>`;
+
+          <img
+            class="viewer-img"
+            src="${src}"
+            alt="${esc(name)}"
+            title="Click to open full size"
+            id="viewer-image"
+          ` + `>
+        `;
+
+        const img = document.getElementById('viewer-image');
+
+        img.addEventListener('click', () => {
+          window.open(src, '_blank', 'noopener,noreferrer');
+        });
+
+        img.addEventListener('error', () => {
+          const message = document.createElement('p');
+
+          message.className = 'muted';
+          message.textContent =
+            'Unable to load this image. Try downloading the file.';
+
+          img.replaceWith(message);
+        });
+
+        return;
       }
+
+      // PDF documents.
+      if (category === 'pdf') {
+        main.innerHTML = `
+          ${meta}
+
+          <iframe
+            class="viewer-pdf"
+            src="${src}"
+            title="${esc(name)}"
+          ></iframe>
+        `;
+
+        return;
+      }
+
+      // JSON, JSONL and NDJSON.
+      if (category === 'json') {
+        main.innerHTML = `
+          ${meta}
+
+          <pre
+            class="viewer-json"
+            id="json-pane"
+          >Loading JSON…</pre>
+        `;
+
+        const isJsonLines = /\.(jsonl|ndjson)$/i.test(name);
+
+        renderTextFile(src, 'json-pane', {
+          json: true,
+          jsonLines: isJsonLines
+        });
+
+        return;
+      }
+
+      // Plain text, Markdown, logs, code, configuration and web source.
+      if (TEXT_PREVIEW_CATEGORIES.has(category)) {
+        main.innerHTML = `
+          ${meta}
+
+          <div class="viewer-info">
+            <div class="viewer-file-heading">
+              <div class="preview-icon big">${emoji(category)}</div>
+
+              <div>
+                <h2>${esc(name)}</h2>
+                <p class="muted">
+                  Source preview · ${esc(category)}
+                </p>
+              </div>
+            </div>
+
+            <pre
+              class="viewer-text"
+              id="text-pane"
+            >Loading file…</pre>
+          </div>
+        `;
+
+        renderTextFile(src, 'text-pane');
+
+        return;
+      }
+
+      // Video files.
+      if (category === 'video') {
+        main.innerHTML = `
+          ${meta}
+
+          <div class="viewer-media-wrap">
+            <video
+              class="viewer-video"
+              controls
+              preload="metadata"
+              playsinline
+            >
+              <source src="${src}">
+              Your browser does not support this video format.
+            </video>
+          </div>
+        `;
+
+        return;
+      }
+
+      // Audio files.
+      if (category === 'audio') {
+        main.innerHTML = `
+          ${meta}
+
+          <div class="viewer-info center">
+            <div class="preview-icon big">${emoji(category)}</div>
+
+            <h2>${esc(name)}</h2>
+
+            <p class="muted">${esc(item.description || '')}</p>
+
+            <audio
+              class="viewer-audio"
+              controls
+              preload="metadata"
+            >
+              <source src="${src}">
+              Your browser does not support this audio format.
+            </audio>
+          </div>
+        `;
+
+        return;
+      }
+
+      // Office documents, archives, binaries and unknown file types.
+      // These formats are download-only unless a safe viewer is implemented.
+      main.innerHTML = `
+        ${meta}
+
+        <div class="viewer-info center">
+          <div class="preview-icon big">${emoji(category)}</div>
+
+          <h2>${esc(name)}</h2>
+
+          <p class="muted">${esc(item.description || '')}</p>
+
+          <p class="muted">
+            ${esc(fmtSize(item.size))} · ${esc(category)}
+          </p>
+
+          <p class="muted">
+            This file type cannot be previewed here.
+            Download it to open it with a compatible application.
+          </p>
+
+          <a class="btn-primary" href="${downloadUrl}">
+            <i class="bi bi-download"></i>
+            Download
+          </a>
+        </div>
+      `;
     }
 
     // ---------------------------------------------------------------------
     // Boot
     // ---------------------------------------------------------------------
+
     let currentItem = null;
 
     async function init() {
       const main = document.getElementById('viewer-main');
+
       try {
-        const res = await fetch(`/api/items/${encodeURIComponent(ITEM_ID)}`);
-        if (!res.ok) {
-          let msg = 'Item not found';
-          try { const j = await res.json(); msg = j.detail || msg; } catch {}
-          throw new Error(msg);
+        const response = await fetch(
+          `/api/items/${encodeURIComponent(ITEM_ID)}`
+        );
+
+        if (!response.ok) {
+          let message = 'Item not found';
+
+          try {
+            const data = await response.json();
+            message = data.detail || message;
+          } catch {}
+
+          throw new Error(message);
         }
-        currentItem = await res.json();
+
+        currentItem = await response.json();
+
         render(currentItem, main);
-      } catch (e) {
+      } catch (error) {
         main.innerHTML = `
           <div class="error">
-            <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
-            <div>${esc(e.message)}</div>
+            <div style="font-size:2rem;margin-bottom:12px;">
+              ⚠️
+            </div>
+
+            <div>${esc(error.message)}</div>
+
             <div style="margin-top:18px;">
               <a class="btn-sm" href="/">
-                <i class="bi bi-house"></i> Back to home
+                <i class="bi bi-house"></i>
+                Back to home
               </a>
             </div>
-          </div>`;
+          </div>
+        `;
       }
     }
 
+    // ---------------------------------------------------------------------
     // Keyboard shortcuts
-    document.addEventListener('keydown', e => {
-      const tag = (e.target && e.target.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.metaKey || e.ctrlKey || e.altKey) return;
+    // ---------------------------------------------------------------------
 
-      if (e.key === 'Escape') {
+    document.addEventListener('keydown', event => {
+      const tag = (
+        event.target && event.target.tagName || ''
+      ).toLowerCase();
+
+      if (
+        tag === 'input' ||
+        tag === 'textarea' ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      if (event.key === 'Escape') {
         location.href = '/';
-      } else if (e.key === 'd' || e.key === 'D') {
+      } else if (event.key === 'd' || event.key === 'D') {
         if (currentItem && currentItem.kind === 'file') {
-          location.href = `/download/${currentItem.id}`;
+          location.href =
+            `/download/${encodeURIComponent(
+              String(currentItem.id ?? ITEM_ID)
+            )}`;
         }
       }
     });
@@ -336,13 +827,15 @@
   </script>
 
   <style>
-    /* Scoped to viewer.html — no changes to style.css needed. */
+    /* Scoped to viewer.html. */
+
     .viewer-skeleton {
       display: flex;
       flex-direction: column;
       gap: 16px;
       padding: 20px 0;
     }
+
     .skel {
       background: linear-gradient(
         90deg,
@@ -354,12 +847,28 @@
       animation: skel-shimmer 1.4s ease-in-out infinite;
       border-radius: 12px;
     }
-    .skel-block { height: 320px; }
-    .skel-line  { height: 18px; width: 60%; }
-    .skel-line.short { width: 35%; }
+
+    .skel-block {
+      height: 320px;
+    }
+
+    .skel-line {
+      height: 18px;
+      width: 60%;
+    }
+
+    .skel-line.short {
+      width: 35%;
+    }
+
     @keyframes skel-shimmer {
-      0%   { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
+      0% {
+        background-position: 200% 0;
+      }
+
+      100% {
+        background-position: -200% 0;
+      }
     }
 
     .viewer-meta {
@@ -370,14 +879,93 @@
       color: var(--muted, #8394ab);
       font-size: 0.78rem;
     }
+
     .viewer-meta span {
       display: inline-flex;
       align-items: center;
       gap: 5px;
     }
-    .viewer-meta i { font-size: 0.9rem; opacity: 0.85; }
 
-    .viewer-img { cursor: zoom-in; }
+    .viewer-meta i {
+      font-size: 0.9rem;
+      opacity: 0.85;
+    }
+
+    .viewer-img {
+      cursor: zoom-in;
+      display: block;
+      max-width: 100%;
+      max-height: calc(100vh - 180px);
+      height: auto;
+      object-fit: contain;
+      margin: 0 auto;
+      border-radius: 12px;
+    }
+
+    .viewer-text,
+    .viewer-json {
+      display: block;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      overflow: auto;
+      max-width: 100%;
+      max-height: 75vh;
+      padding: 1rem;
+      border: 1px solid var(--border, #273244);
+      border-radius: 12px;
+      background: var(--surface, #0f151e);
+      color: var(--text, #e5eaf2);
+      font: 0.9rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: left;
+    }
+
+    .viewer-file-heading {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .viewer-file-heading h2 {
+      overflow-wrap: anywhere;
+    }
+
+    .viewer-file-heading .preview-icon {
+      flex-shrink: 0;
+    }
+
+    .viewer-media-wrap {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+    }
+
+    .viewer-video {
+      display: block;
+      max-width: 100%;
+      max-height: calc(100vh - 180px);
+      border-radius: 12px;
+      background: #000;
+    }
+
+    .viewer-audio {
+      display: block;
+      width: min(100%, 640px);
+      margin: 1rem auto;
+    }
+
+    @media (max-width: 600px) {
+      .viewer-text,
+      .viewer-json {
+        font-size: 0.8rem;
+        padding: 0.75rem;
+      }
+
+      .viewer-img,
+      .viewer-video {
+        max-height: calc(100vh - 220px);
+      }
+    }
   </style>
 </body>
 </html>

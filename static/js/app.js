@@ -1,3 +1,4 @@
+
 // ---------------------------------------------------------------------------
 // Vaultra dashboard
 // ---------------------------------------------------------------------------
@@ -22,49 +23,118 @@ function fmtSize(n) {
   if (!n && n !== 0) return '';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0, x = n;
-  while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+  while (x >= 1024 && i < units.length - 1) {
+    x /= 1024;
+    i++;
+  }
   return `${x.toFixed(x < 10 ? 2 : 1)} ${units[i]}`;
 }
 
+// Keep these categories aligned with the Python backend.
+const PREVIEWABLE_CATEGORIES = new Set([
+  'pdf', 'json', 'text', 'code', 'config', 'web',
+  'png', 'jpg', 'gif', 'webp', 'image', 'audio', 'video',
+]);
+
+const IMAGE_CATEGORIES = new Set([
+  'png', 'jpg', 'gif', 'webp', 'image',
+]);
+
 function emoji(cat) {
-  return ({ pdf: '📕', excel: '📊', json: '🧾', png: '🖼️', jpg: '🖼️', other: '📁' })[cat] || '📁';
+  const icons = {
+    pdf: '📕',
+    excel: '📊',
+    json: '🧾',
+    text: '📝',
+    code: '💻',
+    config: '⚙️',
+    web: '🌐',
+    png: '🖼️',
+    jpg: '🖼️',
+    gif: '🎞️',
+    webp: '🖼️',
+    image: '🖼️',
+    audio: '🎵',
+    video: '🎬',
+    word: '📘',
+    presentation: '📽️',
+    archive: '🗜️',
+    binary: '📦',
+    other: '📁',
+  };
+
+  return icons[String(cat || 'other').toLowerCase()] || '📁';
+}
+
+function isBrowserPreviewable(item) {
+  // The backend may explicitly override the category-based default.
+  if (typeof item.previewable === 'boolean') {
+    return item.previewable;
+  }
+
+  return PREVIEWABLE_CATEGORIES.has(
+    String(item.category || 'other').toLowerCase()
+  );
+}
+
+function previewActionLabel(item) {
+  return isBrowserPreviewable(item) ? 'Preview' : 'Details';
 }
 
 async function api(url, opts = {}) {
   const res = await fetch(url, opts);
+
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+
+    try {
+      const j = await res.json();
+      msg = j.detail || msg;
+    } catch {}
+
     throw new Error(msg);
   }
+
   const ct = res.headers.get('content-type') || '';
-  if (ct.includes('application/json')) return res.json();
+
+  if (ct.includes('application/json')) {
+    return res.json();
+  }
+
   return res.text();
 }
 
 // ---------------------------------------------------------------------------
 // Load & render
 // ---------------------------------------------------------------------------
+
 async function loadItems() {
   try {
-    const data = await api(`/api/items?kind=${state.kind}`);
+    const data = await api(
+      `/api/items?kind=${encodeURIComponent(state.kind)}`
+    );
+
     state.items = data.items || [];
     render();
   } catch (err) {
-    $('#grid').innerHTML = `<div class="empty">⚠️ ${esc(err.message)}</div>`;
+    $('#grid').innerHTML =
+      `<div class="empty">⚠️ ${esc(err.message)}</div>`;
   }
 }
 
 function render() {
   const grid = $('#grid');
   const q = state.search.trim().toLowerCase();
-  const items = !q ? state.items : state.items.filter(it => {
-    const hay = JSON.stringify(it).toLowerCase();
-    return hay.includes(q);
-  });
+
+  const items = !q
+    ? state.items
+    : state.items.filter(it =>
+        JSON.stringify(it).toLowerCase().includes(q)
+      );
 
   $('#empty').classList.toggle('hidden', items.length > 0);
   grid.innerHTML = items.map(cardHtml).join('');
+
   $('#stats').textContent =
     `${items.length} ${state.kind}${items.length === 1 ? '' : 's'}`;
 
@@ -77,116 +147,263 @@ function cardHtml(item) {
   return noteCard(item);
 }
 
+// ---------------------------------------------------------------------------
+// File cards
+// ---------------------------------------------------------------------------
+
 function fileCard(item) {
-  const hasImg = item.category === 'png' || item.category === 'jpg';
+  const category = String(item.category || 'other').toLowerCase();
+  const itemId = encodeURIComponent(String(item.id ?? ''));
+  const safeName = esc(item.name || 'Untitled file');
+  const hasImg = IMAGE_CATEGORIES.has(category);
+  const previewable = isBrowserPreviewable(item);
+
+  // GIFs remain animated when /raw/<id> serves the original GIF.
   const preview = hasImg
-    ? `<img src="/raw/${item.id}" alt="${esc(item.name)}" loading="lazy">`
-    : `<div class="preview-icon">${emoji(item.category)}</div>`;
+    ? `<img
+         src="/raw/${itemId}"
+         alt="${safeName}"
+         loading="lazy"
+         onerror="this.style.display='none';this.parentElement.classList.add('preview-failed')"
+       >`
+    : `<div class="preview-icon">${emoji(category)}</div>`;
+
+  const openLabel = previewActionLabel(item);
+  const openIcon = previewable
+    ? 'bi-box-arrow-up-right'
+    : 'bi-info-circle';
 
   return `
-    <article class="card" data-id="${item.id}">
-      <div class="card-preview" data-open="${item.id}">${preview}</div>
+    <article class="card" data-id="${esc(item.id)}">
+      <div
+        class="card-preview"
+        data-open="${esc(item.id)}"
+        role="link"
+        tabindex="0"
+        aria-label="${openLabel}: ${safeName}"
+      >
+        ${preview}
+      </div>
+
       <div class="card-body">
         <div class="card-head">
-          <span class="badge badge-${esc(item.category)}">${esc(item.category)}</span>
+          <span class="badge badge-${esc(category)}">
+            ${esc(category)}
+          </span>
           <span class="size">${fmtSize(item.size)}</span>
         </div>
-        <h3 class="card-title">${esc(item.name)}</h3>
-        ${item.description ? `<p class="card-desc">${esc(item.description)}</p>` : ''}
+
+        <h3 class="card-title">${safeName}</h3>
+
+        ${
+          item.description
+            ? `<p class="card-desc">${esc(item.description)}</p>`
+            : ''
+        }
+
         <div class="card-actions">
-          <a class="btn-sm" href="/viewer/${item.id}">
-            <i class="bi bi-box-arrow-up-right"></i> Open
+          <a
+            class="btn-sm"
+            href="/viewer/${itemId}"
+            aria-label="${openLabel} ${safeName}"
+          >
+            <i class="bi ${openIcon}"></i>
+            ${openLabel}
           </a>
-          <a class="btn-sm" href="/download/${item.id}">
-            <i class="bi bi-download"></i> Download
+
+          <a class="btn-sm" href="/download/${itemId}">
+            <i class="bi bi-download"></i>
+            Download
           </a>
-          <button class="btn-sm danger" data-delete="${item.id}">
-            <i class="bi bi-trash"></i> Delete
+
+          <button
+            class="btn-sm danger"
+            data-delete="${esc(item.id)}"
+          >
+            <i class="bi bi-trash"></i>
+            Delete
           </button>
         </div>
       </div>
     </article>`;
 }
+
+// ---------------------------------------------------------------------------
+// Link cards
+// ---------------------------------------------------------------------------
 
 function linkCard(item) {
   return `
-    <article class="card" data-id="${item.id}">
+    <article class="card" data-id="${esc(item.id)}">
       <div class="card-body">
         <div class="card-head">
-          <span class="badge"><i class="bi bi-link-45deg"></i> link</span>
+          <span class="badge">
+            <i class="bi bi-link-45deg"></i>
+            link
+          </span>
         </div>
+
         <h3 class="card-title">${esc(item.title)}</h3>
-        <a class="link-url" href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.url)}</a>
-        ${item.description ? `<p class="card-desc">${esc(item.description)}</p>` : ''}
-        ${item.what_it_does ? `<p class="card-desc"><strong>Does:</strong> ${esc(item.what_it_does)}</p>` : ''}
+
+        <a
+          class="link-url"
+          href="${esc(item.url)}"
+          target="_blank"
+          rel="noopener noreferrer"
+        >${esc(item.url)}</a>
+
+        ${
+          item.description
+            ? `<p class="card-desc">${esc(item.description)}</p>`
+            : ''
+        }
+
+        ${
+          item.what_it_does
+            ? `<p class="card-desc"><strong>Does:</strong> ${esc(item.what_it_does)}</p>`
+            : ''
+        }
+
         <div class="card-actions">
-          <a class="btn-sm" href="${esc(item.url)}" target="_blank" rel="noopener">
-            <i class="bi bi-box-arrow-up-right"></i> Open
+          <a
+            class="btn-sm"
+            href="${esc(item.url)}"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <i class="bi bi-box-arrow-up-right"></i>
+            Open
           </a>
+
           <button class="btn-sm" data-copy="${esc(item.url)}">
-            <i class="bi bi-clipboard"></i> Copy
+            <i class="bi bi-clipboard"></i>
+            Copy
           </button>
-          <a class="btn-sm" href="/viewer/${item.id}">
-            <i class="bi bi-info-circle"></i> Details
+
+          <a class="btn-sm" href="/viewer/${encodeURIComponent(String(item.id ?? ''))}">
+            <i class="bi bi-info-circle"></i>
+            Details
           </a>
-          <button class="btn-sm danger" data-delete="${item.id}">
-            <i class="bi bi-trash"></i> Delete
+
+          <button class="btn-sm danger" data-delete="${esc(item.id)}">
+            <i class="bi bi-trash"></i>
+            Delete
           </button>
         </div>
       </div>
     </article>`;
 }
+
+// ---------------------------------------------------------------------------
+// Note cards
+// ---------------------------------------------------------------------------
 
 function noteCard(item) {
   const color = item.color || '#6366f1';
+
   return `
-    <article class="card card-note" data-id="${item.id}" style="--note-color:${esc(color)}">
+    <article
+      class="card card-note"
+      data-id="${esc(item.id)}"
+      style="--note-color:${esc(color)}"
+    >
       <div class="note-strip"></div>
+
       <div class="card-body">
         <div class="card-head">
-          <span class="badge"><i class="bi bi-journal-text"></i> note</span>
+          <span class="badge">
+            <i class="bi bi-journal-text"></i>
+            note
+          </span>
         </div>
+
         <h3 class="card-title">${esc(item.title)}</h3>
-        ${item.description ? `<p class="card-desc">${esc(item.description)}</p>` : ''}
+
+        ${
+          item.description
+            ? `<p class="card-desc">${esc(item.description)}</p>`
+            : ''
+        }
+
         <pre class="note-body">${esc(item.body)}</pre>
+
         <div class="card-actions">
           <button class="btn-sm" data-copy="${esc(item.body)}">
-            <i class="bi bi-clipboard"></i> Copy text
+            <i class="bi bi-clipboard"></i>
+            Copy text
           </button>
-          <a class="btn-sm" href="/viewer/${item.id}">
-            <i class="bi bi-box-arrow-up-right"></i> Open
+
+          <a
+            class="btn-sm"
+            href="/viewer/${encodeURIComponent(String(item.id ?? ''))}"
+          >
+            <i class="bi bi-box-arrow-up-right"></i>
+            Open
           </a>
-          <button class="btn-sm danger" data-delete="${item.id}">
-            <i class="bi bi-trash"></i> Delete
+
+          <button class="btn-sm danger" data-delete="${esc(item.id)}">
+            <i class="bi bi-trash"></i>
+            Delete
           </button>
         </div>
       </div>
     </article>`;
 }
 
+// ---------------------------------------------------------------------------
+// Card actions
+// ---------------------------------------------------------------------------
+
 function bindCardActions() {
   $$('[data-open]').forEach(b => {
-    b.onclick = () => { location.href = `/viewer/${b.dataset.open}`; };
+    const openItem = () => {
+      location.href =
+        `/viewer/${encodeURIComponent(b.dataset.open)}`;
+    };
+
+    b.onclick = openItem;
+
+    b.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openItem();
+      }
+    };
   });
+
   $$('[data-delete]').forEach(b => {
     b.onclick = () => deleteItem(b.dataset.delete);
   });
+
   $$('[data-copy]').forEach(b => {
     b.onclick = async () => {
       try {
         await navigator.clipboard.writeText(b.dataset.copy);
-        const t = b.innerHTML;
-        b.innerHTML = '<i class="bi bi-check2"></i> Copied';
-        setTimeout(() => { b.innerHTML = t; }, 1200);
-      } catch {}
+
+        const original = b.innerHTML;
+
+        b.innerHTML =
+          '<i class="bi bi-check2"></i> Copied';
+
+        setTimeout(() => {
+          b.innerHTML = original;
+        }, 1200);
+      } catch {
+        alert('Could not copy to clipboard.');
+      }
     };
   });
 }
 
 async function deleteItem(id) {
   if (!confirm('Delete this item permanently?')) return;
+
   try {
-    await api(`/api/items/${id}`, { method: 'DELETE' });
+    await api(
+      `/api/items/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    );
+
     await loadItems();
   } catch (err) {
     alert('Delete failed: ' + err.message);
@@ -196,9 +413,11 @@ async function deleteItem(id) {
 // ---------------------------------------------------------------------------
 // Kind tabs (top bar)
 // ---------------------------------------------------------------------------
+
 function syncKindTabs() {
   $$('#kind-tabs .tab').forEach(b => {
     const on = b.dataset.kind === state.kind;
+
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
@@ -206,16 +425,21 @@ function syncKindTabs() {
 
 function switchKind(kind) {
   if (state.kind === kind && !state.search) return;
+
   state.kind = kind;
   state.search = '';
+
   $('#search').value = '';
+
   syncKindTabs();
   syncWrapOptions();
   loadItems();
 }
 
 $$('#kind-tabs .tab').forEach(b => {
-  b.addEventListener('click', () => switchKind(b.dataset.kind));
+  b.addEventListener('click', () =>
+    switchKind(b.dataset.kind)
+  );
 });
 
 $('#search').addEventListener('input', e => {
@@ -226,8 +450,10 @@ $('#search').addEventListener('input', e => {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
+
 function openModal(tab = 'file') {
-  closeWrap();              // collapse the wrap options if open
+  closeWrap();
+
   $('#modal-backdrop').classList.remove('hidden');
   setModalTab(tab);
 }
@@ -241,59 +467,88 @@ function setModalTab(tab) {
   $$('#modal-tabs .mtab').forEach(b =>
     b.classList.toggle('active', b.dataset.mtab === tab)
   );
+
   $$('.modal-body').forEach(f =>
     f.classList.toggle('hidden', f.dataset.pane !== tab)
   );
+
   if (tab !== 'camera') stopCamera();
 }
 
 $('#fab').addEventListener('click', () =>
   openModal(state.kind === 'note' ? 'note' : 'file')
 );
+
 $('#modal-close').addEventListener('click', closeModal);
+
 $('#modal-backdrop').addEventListener('click', e => {
   if (e.target.id === 'modal-backdrop') closeModal();
 });
+
 $$('#modal-tabs .mtab').forEach(b => {
-  b.addEventListener('click', () => setModalTab(b.dataset.mtab));
+  b.addEventListener('click', () =>
+    setModalTab(b.dataset.mtab)
+  );
 });
 
 // ---------------------------------------------------------------------------
 // File form
 // ---------------------------------------------------------------------------
+
 $('#form-file').addEventListener('submit', async e => {
   e.preventDefault();
+
   const form = e.target;
   const btn = form.querySelector('button[type="submit"]');
+
   btn.disabled = true;
-  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Uploading…';
+  btn.innerHTML =
+    '<i class="bi bi-hourglass-split"></i> Uploading…';
+
   try {
     const fd = new FormData();
+
     fd.append('file', form.file.files[0]);
     fd.append('name', form.name.value);
     fd.append('description', form.description.value);
-    await api('/api/upload/file', { method: 'POST', body: fd });
+
+    await api('/api/upload/file', {
+      method: 'POST',
+      body: fd,
+    });
+
     form.reset();
     closeModal();
-    state.kind = 'file'; syncKindTabs(); syncWrapOptions();
+
+    state.kind = 'file';
+    syncKindTabs();
+    syncWrapOptions();
+
     await loadItems();
   } catch (err) {
     alert('Upload failed: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-cloud-upload"></i> Upload to MEGA';
+    btn.innerHTML =
+      '<i class="bi bi-cloud-upload"></i> Upload to MEGA';
   }
 });
 
 // ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
+
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
+
     state.cameraStream = stream;
     $('#camera-video').srcObject = stream;
     $('#camera-capture').disabled = false;
@@ -308,9 +563,14 @@ function stopCamera() {
     state.cameraStream.getTracks().forEach(t => t.stop());
     state.cameraStream = null;
   }
+
   const v = $('#camera-video');
+
   if (v) v.srcObject = null;
-  const cap = $('#camera-capture'), start = $('#camera-start');
+
+  const cap = $('#camera-capture');
+  const start = $('#camera-start');
+
   if (cap) cap.disabled = true;
   if (start) start.disabled = false;
 }
@@ -318,37 +578,53 @@ function stopCamera() {
 async function captureAndUpload() {
   const video = $('#camera-video');
   const canvas = $('#camera-canvas');
+
   if (!video.videoWidth) return;
 
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
+
   canvas.getContext('2d').drawImage(video, 0, 0);
 
   const blob = await new Promise(resolve =>
     canvas.toBlob(b => resolve(b), 'image/png', 0.95)
   );
+
   if (!blob) return;
 
   const form = $('#form-camera');
   const btn = $('#camera-capture');
+
   btn.disabled = true;
-  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Uploading…';
+  btn.innerHTML =
+    '<i class="bi bi-hourglass-split"></i> Uploading…';
 
   try {
     const fd = new FormData();
+
     fd.append('file', blob, 'capture.png');
     fd.append('name', form.name.value);
     fd.append('description', form.description.value);
-    await api('/api/upload/capture', { method: 'POST', body: fd });
+
+    await api('/api/upload/capture', {
+      method: 'POST',
+      body: fd,
+    });
+
     form.reset();
     closeModal();
-    state.kind = 'file'; syncKindTabs(); syncWrapOptions();
+
+    state.kind = 'file';
+    syncKindTabs();
+    syncWrapOptions();
+
     await loadItems();
   } catch (err) {
     alert('Capture upload failed: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-camera"></i> Capture &amp; upload';
+    btn.innerHTML =
+      '<i class="bi bi-camera"></i> Capture &amp; upload';
   }
 }
 
@@ -359,12 +635,17 @@ $('#camera-capture').addEventListener('click', captureAndUpload);
 // ---------------------------------------------------------------------------
 // Link form
 // ---------------------------------------------------------------------------
+
 $('#form-link').addEventListener('submit', async e => {
   e.preventDefault();
+
   const form = e.target;
   const btn = form.querySelector('button[type="submit"]');
+
   btn.disabled = true;
-  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Saving…';
+  btn.innerHTML =
+    '<i class="bi bi-hourglass-split"></i> Saving…';
+
   try {
     await api('/api/upload/link', {
       method: 'POST',
@@ -376,34 +657,51 @@ $('#form-link').addEventListener('submit', async e => {
         what_it_does: form.what_it_does.value,
       }),
     });
+
     form.reset();
     closeModal();
-    state.kind = 'link'; syncKindTabs(); syncWrapOptions();
+
+    state.kind = 'link';
+    syncKindTabs();
+    syncWrapOptions();
+
     await loadItems();
   } catch (err) {
     alert('Failed: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-link-45deg"></i> Save link';
+    btn.innerHTML =
+      '<i class="bi bi-link-45deg"></i> Save link';
   }
 });
 
 // ---------------------------------------------------------------------------
 // Note form
 // ---------------------------------------------------------------------------
+
 const colorPicker = $('#note-color');
 const colorHex = $('#note-color-hex');
-colorPicker.addEventListener('input', () => { colorHex.value = colorPicker.value; });
+
+colorPicker.addEventListener('input', () => {
+  colorHex.value = colorPicker.value;
+});
+
 colorHex.addEventListener('input', () => {
-  if (/^#[0-9a-fA-F]{6}$/.test(colorHex.value)) colorPicker.value = colorHex.value;
+  if (/^#[0-9a-fA-F]{6}$/.test(colorHex.value)) {
+    colorPicker.value = colorHex.value;
+  }
 });
 
 $('#form-note').addEventListener('submit', async e => {
   e.preventDefault();
+
   const form = e.target;
   const btn = form.querySelector('button[type="submit"]');
+
   btn.disabled = true;
-  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Saving…';
+  btn.innerHTML =
+    '<i class="bi bi-hourglass-split"></i> Saving…';
+
   try {
     await api('/api/upload/note', {
       method: 'POST',
@@ -415,30 +713,40 @@ $('#form-note').addEventListener('submit', async e => {
         color: colorHex.value || colorPicker.value,
       }),
     });
+
     form.reset();
+
     colorPicker.value = '#6366f1';
     colorHex.value = '#6366f1';
+
     closeModal();
-    state.kind = 'note'; syncKindTabs(); syncWrapOptions();
+
+    state.kind = 'note';
+    syncKindTabs();
+    syncWrapOptions();
+
     await loadItems();
   } catch (err) {
     alert('Failed: ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-journal-plus"></i> Save note';
+    btn.innerHTML =
+      '<i class="bi bi-journal-plus"></i> Save note';
   }
 });
 
 // ---------------------------------------------------------------------------
 // Wrap FAB → "Show only" section picker
-// Selecting an option SWITCHES THE VIEW — it never opens the upload modal.
+// Selecting an option switches the view; it never opens the upload modal.
 // ---------------------------------------------------------------------------
+
 const wrapBtn = $('#fab-wrap');
 const optionsBox = $('#fab-options');
 
 function syncWrapOptions() {
   $$('.fab-option').forEach(b => {
     const on = b.dataset.viewKind === state.kind;
+
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
@@ -446,24 +754,32 @@ function syncWrapOptions() {
 
 function openWrap() {
   if (!optionsBox || !wrapBtn) return;
+
   syncWrapOptions();
+
   optionsBox.classList.add('open');
   optionsBox.setAttribute('aria-hidden', 'false');
+
   wrapBtn.classList.add('active');
   wrapBtn.setAttribute('aria-expanded', 'true');
 }
 
 function closeWrap() {
   if (!optionsBox || !wrapBtn) return;
+
   optionsBox.classList.remove('open');
   optionsBox.setAttribute('aria-hidden', 'true');
+
   wrapBtn.classList.remove('active');
   wrapBtn.setAttribute('aria-expanded', 'false');
 }
 
 function toggleWrap() {
-  if (optionsBox.classList.contains('open')) closeWrap();
-  else openWrap();
+  if (optionsBox.classList.contains('open')) {
+    closeWrap();
+  } else {
+    openWrap();
+  }
 }
 
 wrapBtn.addEventListener('click', e => {
@@ -471,33 +787,44 @@ wrapBtn.addEventListener('click', e => {
   toggleWrap();
 });
 
-// View selector — filters the dashboard, does NOT open the upload modal.
+// View selector — filters the dashboard, does not open the upload modal.
 $$('.fab-option').forEach(btn => {
   btn.addEventListener('click', e => {
     e.stopPropagation();
+
     const kind = btn.dataset.viewKind || 'file';
+
     closeWrap();
     switchKind(kind);
   });
 });
 
-// Click outside → close the picker.
+// Click outside closes the picker.
 document.addEventListener('click', e => {
   if (!optionsBox.classList.contains('open')) return;
-  if (wrapBtn.contains(e.target) || optionsBox.contains(e.target)) return;
+
+  if (wrapBtn.contains(e.target) || optionsBox.contains(e.target)) {
+    return;
+  }
+
   closeWrap();
 });
 
-// Esc closes the picker (but not when the modal is open).
+// Escape closes the picker, but not while the modal is open.
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+
   if (!$('#modal-backdrop').classList.contains('hidden')) return;
-  if (optionsBox.classList.contains('open')) closeWrap();
+
+  if (optionsBox.classList.contains('open')) {
+    closeWrap();
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+
 syncKindTabs();
 syncWrapOptions();
 loadItems();
