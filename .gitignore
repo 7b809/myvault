@@ -1,0 +1,27 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+files
+data
+output
+tests
+tests
+temp
+# Runtime data — never commit
+data/
+logs/
+*.log
+*.pid
+
+# OS junk
+.DS_Store
+Thumbs.db
